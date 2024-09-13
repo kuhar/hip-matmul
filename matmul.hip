@@ -2501,47 +2501,56 @@ class MmtKernel_256t_MSxNS_amdgcn_mfma_i32_16x16x32i8_shared_Kx2_advanced_pgr2
       }
     };
 
+    int64x2_t A_TB[MS];
+    int64x2_t B_TB[NS/2];
+    auto A_shared_to_TB = [&]() {
+      for (int i = 0; i < MS; ++i)
+        A_TB[i] = A_shared[64 * i + (tid % 64)];
+    };
+    auto B_shared_to_TB = [&]() {
+      for (int j = 0; j < NS / 4; ++j)
+        B_TB[j] = B_shared[256 * j + tid];
+    };
+
     auto mfma = [&]() {
-      int64x2_t A_pre0 = A_shared[tid % 64];
-      int64x2_t A_pre1 = A_shared[64 + (tid % 64)];
-      int64x2_t B_pre0 = B_shared[tid];
-      int64x2_t B_pre1 = B_shared[256 + tid];
       for (int i = 0; i < MS; ++i) {
-        int64x2_t A_curr = A_pre0;
-        int i_next = i + 2;
-        A_pre0 = A_pre1;
-        A_pre1 = i_next < MS ? A_shared[64 * i_next + (tid % 64)] : A_pre1;
         for (int j = 0; j < NS / 4; ++j) {
-          int64x2_t B_curr = B_pre0;
-          int j_next = (j + 2) % (NS/ 4);
-          B_pre0 = B_pre1;
-          B_pre1 = (j_next < NS / 4) ? B_shared[256 * j_next + tid] : B_pre1;
           for (int k = 0; k < 2; ++k) {
             acc[i][j] = __builtin_amdgcn_mfma_i32_16x16x32_i8(
-                A_curr[k], B_curr[k], acc[i][j], 0, 0, 0);
+                A_TB[i][k], B_TB[j][k], acc[i][j], 0, 0, 0);
           }
         }
       }
     };
 
+    auto syncLds = [] {
+      //__builtin_amdgcn_s_waitcnt(0xc07f);
+      __builtin_amdgcn_s_barrier();
+    };
+
     global_to_vgpr0();
-    __syncthreads();
     vpgr0_to_shared();
     if (K_outer >= 2) {
       global_to_vgpr0();
+      syncLds();
+      A_shared_to_TB();
+      B_shared_to_TB();
       for (int k_outer = 0; k_outer < K_outer - 2; ++k_outer) {
-        __syncthreads();
-        mfma();
-        __syncthreads(); // Why is this needed?
+        syncLds();
         vpgr0_to_shared();
         global_to_vgpr0();
+        mfma();
+        syncLds();
+        A_shared_to_TB();
+        B_shared_to_TB();
       }
-      __syncthreads();
-      mfma();
-      __syncthreads();
+      syncLds();
       vpgr0_to_shared();
+      mfma();
     }
-    __syncthreads();
+    syncLds();
+    A_shared_to_TB();
+    B_shared_to_TB();
     mfma();
 
     int32x4_t *C_ptr = static_cast<int32x4_t *>(C_data) +
@@ -2558,7 +2567,7 @@ int main() {
   std::printf("Best-performing kernels for each element types:\n\n");
 //  test(MmtKernel_256t_MSxNS_amdgcn_mfma_i32_16x16x32i8_shared_Kx2<8, 8>());
   test(MmtKernel_256t_MSxNS_amdgcn_mfma_i32_16x16x32i8_shared_Kx2_pipelineload<8, 8>());
-  test(MmtKernel_256t_MSxNS_amdgcn_mfma_i32_16x16x32i8_shared_Kx2_advanced_pgr2<12, 8>());
+  test(MmtKernel_256t_MSxNS_amdgcn_mfma_i32_16x16x32i8_shared_Kx2_advanced_pgr2<8, 8>());
   // test(MmtKernel_256t_MSxNS_amdgcn_mfma_f32_16x16x16f16_shared<8, 8>());
   // test(MmtKernel_256t_MSxNS_amdgcn_mfma_f32_16x16x16f16_shared_Kx2<8, 8>());
   // test(MmtKernel_1024t_MSxNS_amdgcn_mfma_f32_16x16x4f32_shared_Kx4<8, 8>());
